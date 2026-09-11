@@ -1865,6 +1865,15 @@ class MCPAssistConversationEntity(ConversationEntity):
             else:
                 payload["max_tokens"] = self.max_tokens
 
+        # OpenClaw gateway's /v1/chat/completions derives the session key
+        # from the OpenAI `user` field. Without it, every request creates
+        # a new session and conversation history fragments across UUIDs.
+        # conversation_id is the HA-provided stable id for this wake-word
+        # session; setting it as `user` routes all turns into one OpenClaw
+        # session automatically. No effect on non-OpenClaw endpoints.
+        if self._current_conversation_id:
+            payload["user"] = f"mcp-assist:{self._current_conversation_id}"
+
         # Tools
         if tools:
             payload["tools"] = tools
