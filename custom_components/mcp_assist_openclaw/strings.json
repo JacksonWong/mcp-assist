@@ -145,7 +145,7 @@
   },
   "entity": {
     "conversation": {
-      "mcp_assist": {
+      "mcp_assist_openclaw": {
         "name": "{profile_name}"
       }
     }
