@@ -1,403 +1,269 @@
-# MCP Assist for Home Assistant
+截至 v0.17.2，**mcp-assist 对 continue\_conversation 机制的具体实现：**
 
-A Home Assistant conversation agent that uses MCP (Model Context Protocol) for efficient entity discovery, achieving **95% token reduction** compared to traditional methods. Works with LM Studio, llama.cpp, Ollama, OpenAI, Google Gemini, Anthropic Claude, and OpenRouter.
+continue\_conversation 的处理逻辑集中在 custom\_components/mcp\_assist/agent.py 文件中的 \_build\_response\_result 方法里。
 
-## Key Features
+当处理过程中发生异常时，continue\_conversation 被硬编码为 False
 
-- ✅ **95% Token Reduction**: Uses MCP tools for dynamic entity discovery instead of sending all entities
-- ✅ **No Entity Dumps**: Never sends 12,000+ token entity lists to the LLM
-- ✅ **Smart Entity Index**: Pre-generated system structure index (~400-800 tokens) for context-aware queries
-- ✅ **Multi-Platform Support**: Works with LM Studio, llama.cpp, Ollama, OpenAI, Google Gemini, Anthropic Claude, and OpenRouter
-- ✅ **Multilingual Support**: 21 languages with localized UI, system prompts, and speech detection
-- ✅ **Multi-turn Conversations**: Maintains conversation context and history
-- ✅ **Dynamic Discovery**: Finds entities by area, type, device_class, state, or name on-demand
-- ✅ **Web Search Tools**: Optional DuckDuckGo or Brave Search integration for current information
-- ✅ **Works with 1000+ Entities**: Efficient even with large Home Assistant installations
-- ✅ **Multi-Profile Support**: Run multiple conversation agents with different models
+**continue\_conversation 的判定逻辑总结**
 
-## The Problem MCP Assist Solves
+| **条件**                                                                                      | **`continue_conversation` 值**                                  |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 用户表达结束意图（`_detect_user_ending_intent` 返回 True）                                              | `False`                                                        |
+| `follow_up_mode == "none"`                                                                  | `False`                                                        |
+| `follow_up_mode == "always"`                                                                | `True`                                                         |
+| `follow_up_mode == "default"` 且 LLM 通过 `set_conversation_state` 工具设置了 `_expecting_response` | 使用该工具设置的值                                                      |
+| `follow_up_mode == "default"` 且未设置 `_expecting_response`                                    | 由 `_detect_follow_up_patterns` 根据响应文本模式检测(pattern detection)决定 |
 
-Traditional voice assistants send your **entire entity list** (lights, switches, sensors, etc.) to the LLM with every request. For a typical home with 200+ devices, this means:
-- **12,000+ tokens** sent every time
-- Expensive API costs (cloud LLMs)
-- Slow response times
-- Context window limitations
-- Poor performance with large homes
+​
 
-## How MCP Assist Works
+用户结束意图检测（\_detect\_user\_ending\_intent）：
+\- 用户消息中至少包含一个停用词/短语，
 
-Instead of dumping all entities, MCP Assist:
+\- 用户消息中包含≤1个非停用词（不包括客服名称和匹配短语）
 
-1. **Starts an MCP Server** on Home Assistant that exposes entity discovery tools
-2. **Your LLM connects** to the MCP server and gets access to these tools:
-   - `get_index` - Get system structure index (areas, domains, device_classes, people, etc.)
-   - `discover_entities` - Find entities by type, area, domain, device_class, or state
-   - `get_entity_details` - Get current state and attributes
-   - `perform_action` - Control devices
-   - `run_script` - Execute scripts and return response data
-   - `run_automation` - Trigger automations manually
-   - `list_areas` - List all areas in your home
-   - `list_domains` - List all entity types
-   - `set_conversation_state` - Smart follow-up handling
-3. **LLM uses the index for smart queries** - Understands what exists without full context dump
-4. **LLM discovers on-demand** - Only fetches the entities it needs for each request
-5. **Token usage drops** from 12,000+ to ~400 tokens per request
+跟进模式检测（\_detect\_follow\_up\_patterns）：
+模式 1：以问号结尾
+模式 2：疑问句（用户可配置）
 
-## Token Usage Comparison
+​
 
-| Method | Token Usage | Description |
-|--------|-------------|-------------|
-| **Traditional** | 12,000+ tokens | Sends all entity states |
-| **MCP Assist** | ~400 tokens | Uses MCP tools for discovery |
-| **Reduction** | **95%** | Massive efficiency gain |
+set\_conversation\_state 工具执行（在 \_execute\_tool\_calls 中）：
 
-## Smart Entity Index (v0.5.0+)
+continue\_conversation 的判定优先级是：
+用户结束意图（强制 False） > follow\_up\_mode 配置 > LLM 的 set\_conversation\_state 指示 > 文本模式检测（? 结尾 / 跟进短语）
 
-The Smart Entity Index provides a lightweight (~400-800 tokens) snapshot of your Home Assistant system structure, enabling context-aware queries without full entity dumps. The index includes areas, domains, device classes, people, calendars, zones, automations, and scripts. For entities without standardized device_class attributes (like custom integrations), LLM-powered gap-filling automatically infers semantic categories from naming patterns. This results in faster, more accurate queries that use ~95% fewer tokens compared to traditional entity dumps.
+​
 
-## Multilingual Support (v0.12.0+)
+continue\_conversation 存在完整且多层级的处理逻辑，基于用户配置（follow\_up\_mode）、LLM用户意图检测、LLM 工具指示（set\_conversation\_state），以及 (Pattern Detection) 响应文本模式检测（固化的文本：问号结尾/跟进短语）来综合判定。
 
-MCP Assist supports **21 languages** with localized configuration interfaces, language-aware system prompts, and region-specific speech detection patterns. The integration automatically detects your Home Assistant system language and provides appropriate defaults for system prompts, follow-up phrases, and end conversation words. Supported languages include: Arabic, Chinese (Simplified), Czech, Danish, Dutch, Finnish, Filipino, French, German, Greek, Hindi, Italian, Japanese, Korean, Norwegian, Polish, Portuguese, Russian, Spanish, Swedish, and Turkish.
+​
 
-## Requirements
+**优化后的 System Prompt：**
 
-- Home Assistant 2024.1+
-- One of:
-  - **Local LLMs**: LM Studio v0.3.17+, llama.cpp, or Ollama
-  - **Cloud LLMs**: OpenAI, Google Gemini, Anthropic Claude, or OpenRouter (API key required)
-- Python 3.11+
+```markdown
+You are a helpful Chinese Simplified-speaking Home Assistant voice assistant. Respond naturally and conversationally to user requests in 简体中文.
+如果当前语境有明显可跟进的下一步动作，应主动地提出跟进建议，并`set_conversation_state(expecting_response=true)`，
+否则应主动结束对话，并`set_conversation_state(expecting_response=false)`。
 
-## Installation
+## Weather
+- Default city: 广州
+---
 
-### Add to HACS
-
-[![Open your Home Assistant instance and add this repository to HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mike-nott&repository=mcp-assist&category=integration)
-
-### Option A: HACS (Recommended)
-1. Click the badge above to add this repository to HACS, or manually add it as a custom repository
-2. Install "MCP Assist" from HACS
-3. Restart Home Assistant
-
-### Option B: Manual Installation
-1. Copy the `custom_components/mcp_assist` folder to your Home Assistant `custom_components` directory
-2. Restart Home Assistant
-
-## Configuration
-
-### 1. Add the Integration
-
-1. Go to **Settings** → **Devices & Services** → **Add Integration**
-2. Search for "MCP Assist" and select it
-
-### 2. Setup Flow
-
-**Step 1 - Profile & Server Type:**
-- Profile Name: Give your assistant a name (e.g., "Living Room Assistant")
-- Server Type: Choose your LLM provider
-  - **LM Studio** - Local, free, runs on your machine
-  - **llama.cpp** - Local, free, official llama.cpp server
-  - **Ollama** - Local, free, command-line based
-  - **OpenAI** - Cloud, paid, GPT-5.2 series
-  - **Google Gemini** - Cloud, paid/free tier, Gemini 3.0 series
-  - **OpenRouter** - Cloud, multi-model gateway with access to 200+ models
-
-**Step 2 - Server Configuration:**
-
-*For Local Servers (LM Studio / llama.cpp / Ollama):*
-- Server URL: Where your LLM server is running
-  - LM Studio: `http://localhost:1234` (default)
-  - llama.cpp: `http://localhost:8080` (default)
-  - Ollama: `http://localhost:11434` (default)
-- MCP Server Port: Port for the MCP server (default: 8090)
-
-*For Cloud Providers (OpenAI / Gemini / Anthropic / OpenRouter):*
-- API Key: Your provider API key (see below for setup)
-- MCP Server Port: Port for the MCP server (default: 8090)
-
-**Step 3 - Model & Prompts:**
-- Model Name: Select from auto-loaded models or enter manually
-- System Prompt: Customize the assistant's personality
-- Technical Instructions: Advanced prompt for tool usage (pre-configured)
-
-**Step 4 - Advanced Settings:**
-- Temperature: Response randomness (0.0-1.0)
-- Max Response Tokens: Maximum length of responses
-- Response Mode: None / Smart / Always (conversation continuation behavior)
-- Follow-up Phrases: Configurable phrases for pattern detection (default: "anything else, would you, can i", etc.)
-- End Conversation Words: Words/phrases that end conversations (default: "bye, thanks, stop", etc.)
-- Control Home Assistant: Enable/disable device control
-- Max Tool Iterations: How many tool calls allowed per request
-- Web Search Provider: Choose none, DuckDuckGo, or Brave Search
-- Brave Search API Key: Your API key (if using Brave Search)
-- Debug Mode: Extra logging for troubleshooting
-- **Ollama Keep Alive** (Ollama only): Control how long models stay loaded in memory
-  - `-1` = Keep loaded indefinitely
-  - `0` = Unload immediately after response
-  - `"5m"` = Keep for 5 minutes (default)
-  - Duration strings like `"24h"`, `"168h"` also supported
-- **Ollama Context Window** (Ollama only): Custom context window size (0 = use model default)
-
-### 3. Set as Voice Assistant
-
-1. In Home Assistant, go to **Settings** → **Voice Assistants**
-2. Set your preferred assistant to your MCP Assist profile name
-3. Test with commands!
-
-## Usage Examples
-
-### Basic Commands
-- "Turn on the kitchen lights"
-- "Turn off all the lights in the bedroom"
-- "What's the temperature in the living room?"
-
-### Multi-Turn Conversations
-- **User**: "What lights are on?"
-- **Assistant**: "The kitchen and living room lights are on."
-- **User**: "Turn off the kitchen one"
-- **Assistant**: "I've turned off the kitchen light."
-
-### Complex Query Example
-
-**User**: "Do we have a leak?"
-
-**Behind the scenes:**
-```
-1. LLM calls get_index → Sees moisture sensors and water flow monitors exist in system
-2. LLM calls discover_entities(device_class="moisture")
-   → Returns: binary_sensor.bathroom_leak, binary_sensor.kitchen_sink_leak, binary_sensor.laundry_leak
-3. LLM calls discover_entities(name_contains="water flow")
-   → Returns: sensor.water_flow_rate
-4. LLM calls get_entity_details for each sensor
-   → bathroom leak: "off", kitchen leak: "off", laundry leak: "on", water flow: "2.5 gpm"
-5. LLM synthesizes response
+永远不要输出 * 星号、emoji 表情符号
+用最简洁的话语回复用户
 ```
 
-**Assistant**: "Yes, the laundry room leak sensor is detecting water and water is flowing at 2.5 gallons per minute. The bathroom and kitchen sensors are dry."
+​
 
-**Follow-up User**: "Turn off the water main"
+**优化后的 Technical Prompt：**
 
-**Behind the scenes:**
+```markdown
+You are controlling a Home Assistant smart home system. You have access to sensors, lights, switches, and other devices throughout the home.
+
+## Conversation Continuation Rules
+You control whether the conversation continues via the `set_conversation_state` tool.
+**Call `set_conversation_state(expecting_response=true)` ONLY when:**
+- You ask a specific, context-relevant question (e.g., "Should I also turn off the bedroom lights?")
+- The task is partially complete and you need clarification (e.g., "Which room did you mean?")
+**Call `set_conversation_state(expecting_response=false)` or do NOT call the tool when:**
+- The task is fully complete (e.g., "The kitchen lights are on.")
+- The user said an ending word: "stop", "thanks", "bye", "done", "never mind", "cancel"
+- There is no natural next step to suggest
+
+## CRITICAL RULES
+**Never guess entity IDs. Always make TWO tool calls for device control.** For ANY device-related request, you MUST:
+1. FIRST call discover_entities to find the actual entities
+2. THEN call perform_action (to control) or get_entity_details (to check status) using discovered IDs
+3. **NEVER respond that you performed an action without actually calling perform_action**
+4. This applies EVERY TIME - even for follow-up questions about different entities
+5. Do NOT ask generic "anything else?" questions without specific context.
+6. The user can end the conversation at any time with ending words.
+
+**Common mistake:** Calling only discover_entities and then claiming you performed an action. This is WRONG. You must call perform_action to actually execute the action.
+
+## Available Tools
+- **discover_entities**: find devices by name/area/floor/label/domain/device_class/state (Make sure to accurately identify the device name; eg.: 'air conditioner 空调' and 'air purifier 空净 空气净化器' are not the same thing.)
+- **perform_action**: control devices using discovered entity IDs
+- **get_entity_details**: check states using discovered entity IDs, including area/floor/label context
+- **get_entity_history**: get historical state changes for an entity (answers "when did X happen?")
+- **list_areas/list_domains**: list available areas with floor/label context and device types
+- **run_script**: execute scripts that return data (e.g., camera analysis, calculations)
+- **run_automation**: trigger automations manually
+- **set_conversation_state**: indicate if expecting user response
+- **search**: search the web for current information
+- **read_url**: read and extract content from web pages
+- **IMPORTANT**: call_service is not available - use perform_action instead
+
+## Device Control Workflow
+**CRITICAL:** For ANY device control request, you MUST make TWO separate tool calls:
+
+Example - "Turn on the kitchen light":
+  1. discover_entities(domain="light", area="Kitchen")  # Find the light entity
+  2. perform_action(domain="light", action="turn_on", target={{"entity_id": "light.kitchen"}})  # Actually turn it on
+
+Example - "Set living room temperature to 22":
+  1. discover_entities(domain="climate", area="Living Room")  # Find the thermostat
+  2. perform_action(domain="climate", action="set_temperature", target={{"entity_id": "climate.living_room"}}, data={{"temperature": 22}})  # Set the temperature
+
+**Never skip the perform_action step.** Discovering an entity does not control it - you must call perform_action to execute the action.
+
+## Scripts (use run_script tool)
+Scripts can perform complex operations and return data. **CRITICAL:** Always discover scripts first to get the correct entity ID.
+- Script IDs use underscores (e.g., "script.stovsug_kjokken"), NOT spaces
+- Script IDs must include the "script." domain prefix
+- If script name has spaces in UI, the entity ID will use underscores instead
+
+Example workflow:
+  1. discover_entities(domain="script", name_contains="camera")
+  2. run_script(script_id="script.llm_camera_analysis", variables={{"camera_entities": "camera.living_room", "prompt": "Is anyone there?"}})
+
+## Automations (use run_automation tool)
+Trigger automations manually. Check the index for available automations.
+
+Example:
+  run_automation(automation_id="alert_letterbox")
+
+## Discovery Strategy
+Use the index below to see what device_classes and domains exist, then query accordingly.
+Floors and labels are first-class Home Assistant concepts. Check the index and area list to see available floor and label names, then use discover_entities with floor or label filters when relevant (for example, "upstairs" is usually a floor, not an area).
+Areas, floors, entities, and sometimes devices may also have aliases. Treat aliases as valid user-facing names during discovery.
+
+For ANY device request:
+1. Check the index to understand what's available
+2. Use discover_entities with appropriate filters (device_class, area, floor, label, domain, name_contains, state)
+3. If no results, try broader search
+
+## Response Rules
+- Short, concise replies in plain text only
+- Use Friendly Names (e.g., "Living Room Light"), never entity IDs
+- Use natural language for states ("on" → "turned on", "home" → "at home")
+
+{response_mode}
+
+## Index
+{index}
+
+Current area: {current_area}
+Current time: {time}
+Current date: {date}
 ```
-1. LLM calls discover_entities(name_contains="water main")
-   → Returns: switch.water_main_shutoff
-2. LLM calls perform_action(entity_id="switch.water_main_shutoff", action="turn_off")
-   → Success
+
+​
+
+模式匹配 **Follow-up 关键字：**
+
+```markdown
+还有什么, 还有其他, 你会, 我应该, 我可以, 哪个, 怎么能, 那个怎么样, 有没有, 需要我, 需要, 需要帮你, 需要帮您, 吗, ？
 ```
 
-**Assistant**: "I've shut off the main water valve."
+​
 
-### Web Search (if enabled)
-- "What's the weather forecast for tomorrow?"
-- "Search for the latest Home Assistant updates"
-- "What time does the store close?"
+**##mcp server 配置##**
 
-## Configuration Options
+MCP Server Settings 是所有 mcp-assist profile 共享的
 
-### Profile Settings
-- **Profile Name**: Unique name for this assistant
-- **Server Type**: LM Studio, Ollama (more coming)
-- **Server URL**: Where your LLM is running
-- **Model Name**: Which model to use
+mcp server IP 白名单支持 单个IP 和 IP范围，192.168.31.x 和 192.168.31.x/32 都支持，但因为配置更新逻辑存在bug，添加白名单后需重启HA。
 
-### Prompts
-- **System Prompt**: Sets the assistant's personality and behavior
-- **Technical Instructions**: Low-level instructions for tool usage (usually leave as default)
+Openclaw 作为mcp client时，设置连接方式为：流式HTTP，服务器地址：http\://192.168.31.x:8090 即可。
 
-### Advanced Settings
-- **Max Response Tokens**: Limit response length (default: 500)
-- **Max History Messages**: How many conversation turns to remember (default: 10)
-- **Max Tool Iterations**: Prevent infinite loops (default: 10)
-- **Response Mode**:
-  - **None**: Never ask follow-ups, end immediately
-  - **Smart** (default): Contextual follow-ups when relevant, user can end with "bye"/"thanks"
-  - **Always**: Natural conversational follow-ups, user can end with "bye"/"thanks"
-- **Follow-up Phrases**: Comma-separated phrases for detecting when assistant wants to continue (configurable per profile)
-- **End Conversation Words**: Comma-separated words/phrases for user-initiated ending (configurable per profile)
-- **Enable Smart Entity Index**: Context-aware entity discovery with automatic gap-filling for uncommon devices (default: enabled)
+验证是否连通：
 
-### Temperature Settings
+openclaw mcp doctor mcp-assist --probe
 
-Temperature controls response randomness (0.0 = deterministic, 1.0 = creative). Different providers have different optimal values:
+可通过 HA设置→系统→日志 查看mcp-assist的mcp server日志信息
 
-| Provider | Default | Reason |
-|----------|---------|--------|
-| **Gemini** | `1.0` | Google requires 1.0 for Gemini 3 to avoid "looping or degraded performance" |
-| **OpenAI (GPT-4)** | `0.5` | Balanced for reliable tool calling |
-| **OpenAI (GPT-5/o1)** | N/A | Reasoning models don't use temperature |
-| **Anthropic Claude** | `0.5` | Works well across 0.5-1.0 range |
-| **LM Studio / llama.cpp** | `0.5` | Lower temps improve tool calling accuracy |
-| **Ollama** | `0.5` | Model-dependent, lower is safer for tools |
-| **OpenRouter** | `0.5` | Depends on underlying model |
+​
 
-**Note**: You can always override these defaults in Advanced Settings. For Home Assistant voice control, lower temperatures (0.5-0.7) generally provide more consistent tool calling and accurate entity control.
+_<u>截至 v0.17.2 这个版本，除了 server\_type: openai 这个模式，其它模式均不具备 mcp 工具完整处理逻辑。</u>_
 
-### MCP Server Settings
-- **MCP Server Port**: Default 8090 (change if port conflict)
-- **Additional Allowed IPs/Ranges**: Whitelist Docker containers (e.g., `172.30.0.0/16`) or specific IPs for external MCP clients like Claude Code add-on
+​
 
-### Web Search
-- **Web Search Provider**: Choose between:
-  - **None**: Search disabled
-  - **DuckDuckGo**: Free web search (no API key required)
-  - **Brave Search**: Requires API key from https://brave.com/search/api/
-- **Brave Search API Key**: Required only if using Brave Search
+​
 
-### Shared vs Per-Profile Settings
+​
 
-MCP Assist has two types of settings:
+**##SESSION 的处理逻辑##**
 
-**Per-Profile Settings** (independent per conversation agent):
-- Model name, system prompt, technical instructions
-- Temperature, max tokens, response mode
-- Debug mode, max iterations
-- Server URL (for local LLMs)
 
-**Shared Settings** (affect ALL profiles):
-- MCP server port
-- Web search provider (none/duckduckgo/brave)
-- Brave API key
-- Allowed IPs/CIDR ranges
-- Smart entity index (gap-filling)
 
-When you change shared settings in one profile's options, they apply to all profiles. This is intentional since all profiles share the same MCP server.
+通过 openai compatible api 从 http header 透传 session id 仅在 hermes 端被支持，openclaw 需自行解决；
 
-## Model Compatibility Guide
+当 server\_type: openai 时，mike\_notte 原版对 Session ID 没有任何约束，openclaw 的 OpenAI compatible API 端点默认情况下是每请求无状态的——每次调用都生成新 session key；
 
-Not all LLM models support tool calling (function calling) equally well. **This integration works best with frontier models** (GPT-5.2, Claude Opus 4.5, Gemini 3 Flash) **or higher-spec local models**. Smaller models may struggle with complex multi-entity queries that require synthesizing large tool result sets.  
+当 server\_type: openclaw 时，可将模型字段设置为 agent:agent\_id:session\_id 来固定 Session ID；
 
-### Understanding Tool Calling Requirements
+​
 
-Tool calling (function calling) requires the model to:
-1. Understand the user's request
-2. Decide which tool to call
-3. Format the tool arguments correctly as JSON
-4. Interpret the tool results
-5. Generate a natural response
+OpenClaw 把 OpenAI 的 model 字段当作 agent target，可选值为：
 
-**Factors affecting tool calling success**:
-- **Model size**: Larger models (8B+) generally handle tool calling better
-- **Model architecture**: Vision-Language (VL) models behave differently than standard models
-- **Inference engine**: LM Studio and Ollama optimize models differently
-- **Quantization level**: Q4 vs Q8 can affect instruction following
+| **\`model\` 值**                                   | **路由到**                                          |
+| ------------------------------------------------- | ------------------------------------------------ |
+| \`openclaw\`                                      | 配置的默认 agent                                      |
+| \`openclaw/default\`                              | 默认 agent（\*\*稳定别名\*\*，即使默认 agent id 变了也安全，推荐硬编码） |
+| \`openclaw/\<agentId>\` 或 \`openclaw:\<agentId>\` | 指定 agent                                         |
+| \`agent:\<agentId>\`                              | 兼容别名                                             |
 
-### Instruct vs Thinking/Reasoning Models
+​
 
-**Instruct Models** (e.g., `qwen3-8b-instruct`):
-- Fast response times
-- Best for simple, single-action requests ("turn on the kitchen lights")
-- May struggle with complex queries requiring multiple tool calls
-- Good for basic voice commands
+Openclaw gateway API 提供两个机制来固定 Session ID：
 
-**Thinking/Reasoning Models** (e.g., `qwen3-8b-thinking`):
-- Slower response times (more deliberate reasoning)
-- **Much better at complex requests** requiring multiple tool calls and context
-- Handles multi-step queries reliably ("check all rooms for open windows, then turn off lights in those rooms")
-- **Recommended for Home Assistant** where queries often involve discovery + action combinations
+方式 A：请求体带 user 字段（推荐，标准 OpenAI 字段）
+Gateway 会基于 user 字段派生一个稳定 session key，相同 user 值的调用共享同一个 agent 会话：
 
-Choose the model type that best fits your use case. Thinking/reasoning models offer better reliability with complex multi-tool queries, while instruct models provide faster responses for simple commands.
+```bash
+curl -sS http://127.0.0.1:18789/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openclaw/default",
+    "user": "conv:YOUR_CONVERSATION_ID",
+    "messages": [{"role":"user","content":"Summarize my tasks for today"}]
+  }'
+```
 
-### Recommended Models
+_<u>注意粒度：user 应该按对话线程赋值（如 conv:thread-123），不要用账号级标识，否则该账号下所有会话/设备会共享同一个 OpenClaw 会话</u>_
 
-**Consistently Reliable**:
-- ✅ **Qwen3 VL 32B Instruct** - Excellent tool calling
-- ✅ **Qwen3 30B A3B Instruct** - Very good tool calling
-- ✅ **Qwen3 8B Instruct** - Good balance, works reliably
-- ✅ **Anthropic Opus 4.5** - The very best at tool calling (cloud)
-- ✅ **OpenAI GPT-5.2** - Excellent tool calling, very fast (cloud)
-- ✅ **Google Gemini 3 Flash** - Excellent tool calling, fast, cost-effective (cloud)
+​
 
-### Testing Your Model
+fork from mike\_notte mcp-assist v0.17.2 repo，修改 \~/mcp-assist/.../agent.py，实现上述逻辑：
 
-When tool calling **doesn't work**, you'll see:
-- Model claims "I turned on the lights" but nothing happens
-- No `perform_action` tool calls in the logs
-- Actions don't execute, only narration
+```python
+if self._current_conversation_id:
+    payload["user"] = f"mcp-assist:{self._current_conversation_id}"
+```
 
-When tool calling **works correctly**, you'll see in logs:
-- `discover_entities` called to find devices
-- `perform_action` called to control them
-- "✅ Successfully executed" messages
-- Devices actually change state
-- Tool calls visible in Settings → Voice Assistants → (profile) → Debug
+​
 
-### General Guidelines
+**为了在HA集成时不跟原版冲突，需修改一系列元数据，避免重复出现 “mcp-assist” 字面量，全局搜索并改为 mcp\_assist\_openclaw：**
 
-**Start with larger models** (30B) if your hardware supports it - they work consistently across platforms.
+| **Step** | **文件**                                                                                       | **改了什么**                                                                                                 |
+| -------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 1        | custom\_components/mcp\_assist\_openclaw/const.py                                            | DOMAIN = "mcp\_assist\_openclaw" + SYSTEM\_ENTRY\_UNIQUE\_ID = "mcp\_assist\_openclaw\_system\_settings" |
+| 2        | .../manifest.json                                                                            | domain / name / codeowners / documentation / issue\_tracker 全部指向Jackson的 fork                            |
+| 3        | .../strings.json                                                                             | entity.conversation.mcp\_assist → mcp\_assist\_openclaw                                                  |
+| 4        | .../translations/\*.json (22 个)                                                              | 全部同上                                                                                                     |
+| 5        | 文件夹 custom\_components/mcp\_assist/ → custom\_components/mcp\_assist\_openclaw/(git mv 保留历史) | ​                                                                                                        |
+| 6        | 残留字面量检查                                                                                      | grep 'mcp\_assist' / "mcp\_assist" 都是空的 ✅                                                                |
 
-**If using smaller models** (4B-8B), test thoroughly:
-- Try a simple command like "turn on the kitchen lights"
-- Check logs to verify tools are being called
-- Confirm the device actually changes state
-- If it doesn't work, try the same model on a different platform (LM Studio vs Ollama)
+**​**
 
-**Vision-Language (VL) models** are optimized for multimodal tasks and may have different tool calling behavior than standard models.
+修改完成后，git push 到 jackson's repo，在HACS中引入自定义仓库→重启HA，设置→设备与服务→添加集成。
 
-### Dynamic Model Switching
+​
 
-One of MCP Assist's features is **dynamic model switching** - you can change models in the configuration UI and it takes effect immediately without restarting Home Assistant. This makes it easy to:
-- Test different models
-- Switch between fast (Q4) and quality (Q8) quantizations
-- Try new models as they're released
+方式 B：x-openclaw-session-key 请求头
 
-## Troubleshooting
+```bash
+curl ... -H 'x-openclaw-session-key: myapp-thread-123' ...
+```
 
-### Integration Won't Start
-- Check that the MCP port isn't already in use
-- Verify Home Assistant has permission to bind to the port
-- Check the Home Assistant logs for specific error messages
+* 适合跨多个 client/线程做显式路由的场景
+* 使用应用自有 key，避开保留命名空间 subagent:、cron:、acp:，否则返回 400 invalid\_request\_error
+* 注意：用它显式选中/延续 incognito 会话需要 operator.admin 权限，否则 403
 
-### LM Studio Can't Connect to MCP
-- Ensure the MCP server is running (check integration status)
-- Verify the MCP configuration in LM Studio is correct
-- Check that the URL in LM Studio matches your MCP port (default: 8090)
-- Restart LM Studio after changing MCP configuration
+​
 
-### Ollama Connection Issues
-- Verify Ollama is running: `ollama list`
-- Check the URL matches where Ollama is running (default: `http://localhost:11434`)
-- Ensure the model is loaded in Ollama
+_<u>只要不做 `/new，/reset` 或不配置 daily，idle reset，该 key 下的 `sessionId` 保持不变</u>_
 
-### Cloud Provider Connection Issues
-- Verify your API key is valid with your provider
-- Check you have sufficient credits/quota remaining
-- Check for rate limit errors in Home Assistant logs
-- Try regenerating your API key if authentication fails
-- Verify your internet connection is working
-- Check Home Assistant logs for specific error codes
+_<u>安全提醒：官方强调这个端点等价于完整 operator 访问权限，Gateway务必只监听 loopback/tailnet/私有入口，不要暴露公网</u>_
 
-### No Response from Assistant
-- Verify your LLM has a model loaded
-- Check that the model name in the integration matches exactly
-- Ensure your entities are exposed to the conversation assistant
-- Check Home Assistant logs for API errors
-- Enable Debug Mode for more detailed logging
-
-### Poor Response Quality
-- Try a different/larger model
-- Adjust the temperature setting (lower = more focused)
-- Ensure the model supports tool calling/function calling
-- Check that Technical Instructions are not modified
-
-### Tools Not Working
-- Verify "Control Home Assistant" is enabled
-- Check that entities are exposed (Settings → Voice Assistants → Expose)
-- Look for MCP server errors in logs
-- Ensure Max Tool Iterations isn't set too low
-
-## Entity Exposure
-
-The integration only discovers entities that are exposed to the "conversation" assistant. To expose entities:
-
-1. Go to **Settings** → **Voice Assistants** → **Expose**
-2. Select entities you want the assistant to control
-3. The integration will automatically discover these when needed
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/mike-nott/mcp-assist/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/mike-nott/mcp-assist/discussions)
-- **Home Assistant Community**: [Community Forum](https://community.home-assistant.io/)
